@@ -1,8 +1,9 @@
-numpy
-torch
-tensorboard
-gym
 box2d-py
-ray
-seaborn
+gym[atari]
 nevergrad
+numpy
+tensorflow-gpu
+tensorflow-probability
+tensorboardX
+torch
+ray[tune]

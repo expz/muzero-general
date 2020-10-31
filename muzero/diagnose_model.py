@@ -3,8 +3,8 @@ import numpy
 import seaborn
 import torch
 
-import models
-from self_play import MCTS, Node, SelfPlay
+import muzero.models as models
+from muzero.self_play import MCTS, Node, SelfPlay
 
 
 class DiagnoseModel:

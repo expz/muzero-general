@@ -1,0 +1,4 @@
+-e .
+
+GPUtil==1.4.0
+seaborn
