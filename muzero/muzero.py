@@ -95,7 +95,7 @@ class MuZero:
         self.replay_buffer = {}
 
         # Trick to force DataParallel to stay on CPU
-        @ray.remote(num_cpus=0, num_gpus=0)
+        @ray.remote(num_cpus=0, num_gpus=self.num_gpus)
         def get_initial_weights(config):
             model = models.MuZeroNetwork(config)
             weigths = model.get_weights()
