@@ -11,6 +11,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 import muzero.diagnose_model as diagnose_model
+from muzero.games.defaults import MuZeroConfig
 import muzero.models as models
 import muzero.replay_buffer as replay_buffer
 import muzero.self_play as self_play
@@ -41,7 +42,9 @@ class MuZero:
         try:
             game_module = importlib.import_module("muzero.games." + game_name)
             self.Game = game_module.Game
-            self.config = game_module.MuZeroConfig()
+            self.config = MuZeroConfig()
+            for param, value in game_module.CONFIG.items():
+                setattr(self.config, param, value)
         except ModuleNotFoundError as err:
             print(
                 f'{game_name} is not a supported game name, try "cartpole" or refer to the documentation for adding a new game.'
