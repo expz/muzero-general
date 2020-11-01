@@ -81,13 +81,13 @@ Network summary:
 git clone https://github.com/werner-duvaud/muzero-general.git
 cd muzero-general
 
-pip install -r requirements.txt
+make venv
 ```
 
 ### Run
 
 ```bash
-python muzero.py
+python run.py
 ```
 To visualize the training results, run in a new terminal:
 ```bash
