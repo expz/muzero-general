@@ -2,7 +2,7 @@ import copy
 import datetime
 import os
 
-import torch
+import tensorflow as tf
 
 
 class MuZeroConfig:
@@ -10,9 +10,9 @@ class MuZeroConfig:
 
 
 DEFAULT_CONFIG = {
-    'seed': 0,  # Seed for numpy, torch and the game
+    'seed': 0,  # Seed for numpy, tensorflow and the game
     'save_model': True,  # Save the checkpoint in results_path as model.checkpoint
-    'train_on_gpu': True if torch.cuda.is_available() else False,  # Train on GPU if available
+    'train_on_gpu': True if len(tf.config.experimental.list_physical_devices('GPU')) > 0 else False,  # Train on GPU if available
     'optimizer': "SGD",  # "Adam" or "SGD". Paper uses SGD
     'momentum': 0.9,  # Used only if optimizer is SGD
     'weight_decay': 1e-4,  # L2 weights regularization

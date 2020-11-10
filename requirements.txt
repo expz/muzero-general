@@ -1,4 +1,5 @@
 box2d-py
+graphviz
 gym[atari]
 nevergrad
 numpy

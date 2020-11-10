@@ -4,7 +4,7 @@ import sys
 import nevergrad
 import ray
 
-from muzero.muzero import MuZero
+from muzero.muzero import MuZero, hyperparameter_search
 
 
 if __name__ == "__main__":

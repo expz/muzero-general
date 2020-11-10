@@ -3,9 +3,14 @@ import time
 
 import numpy
 import ray
-import torch
+import tensorflow as tf
 
 import muzero.models as models
+
+
+def scale_gradient(t, scale):
+    """Retain the value of t while reducing its gradient"""
+    return tf.cast(scale, dtype=tf.float32) * t + tf.cast(1 - scale, dtype=tf.float32) * tf.stop_gradient(t)
 
 
 @ray.remote
@@ -20,32 +25,26 @@ class Trainer:
 
         # Fix random generator seed
         numpy.random.seed(self.config.seed)
-        torch.manual_seed(self.config.seed)
+        tf.random.set_seed(self.config.seed)
 
         # Initialize the network
         self.model = models.MuZeroNetwork(self.config)
         self.model.set_weights(copy.deepcopy(initial_checkpoint["weights"]))
-        self.model.to(torch.device("cuda" if self.config.train_on_gpu else "cpu"))
-        self.model.train()
 
         self.training_step = initial_checkpoint["training_step"]
 
-        if "cuda" not in str(next(self.model.parameters()).device):
+        if not tf.config.experimental.list_physical_devices('GPU'):
             print("You are not training on GPU.\n")
 
         # Initialize the optimizer
         if self.config.optimizer == "SGD":
-            self.optimizer = torch.optim.SGD(
-                self.model.parameters(),
-                lr=self.config.lr_init,
-                momentum=self.config.momentum,
-                weight_decay=self.config.weight_decay,
+            self.optimizer = tf.keras.optimizers.SGD(
+                learning_rate=self.config.lr_init,
+                momentum=self.config.momentum
             )
         elif self.config.optimizer == "Adam":
-            self.optimizer = torch.optim.Adam(
-                self.model.parameters(),
-                lr=self.config.lr_init,
-                weight_decay=self.config.weight_decay,
+            self.optimizer = tf.keras.optimizers.Adam(
+                learning_rate=self.config.lr_init
             )
         else:
             raise NotImplementedError(
@@ -54,7 +53,7 @@ class Trainer:
 
         if initial_checkpoint["optimizer_state"] is not None:
             print("Loading optimizer...\n")
-            self.optimizer.load_state_dict(
+            self.optimizer.set_weights(
                 copy.deepcopy(initial_checkpoint["optimizer_state"])
             )
 
@@ -86,9 +85,7 @@ class Trainer:
                 shared_storage.set_info.remote(
                     {
                         "weights": copy.deepcopy(self.model.get_weights()),
-                        "optimizer_state": copy.deepcopy(
-                            models.dict_to_cpu(self.optimizer.state_dict())
-                        ),
+                        "optimizer_state": copy.deepcopy(self.optimizer.get_weights()),
                     }
                 )
                 if self.config.save_model:
@@ -96,7 +93,7 @@ class Trainer:
             shared_storage.set_info.remote(
                 {
                     "training_step": self.training_step,
-                    "lr": self.optimizer.param_groups[0]["lr"],
+                    "lr": self.optimizer.learning_rate.numpy(),
                     "total_loss": total_loss,
                     "value_loss": value_loss,
                     "reward_loss": reward_loss,
@@ -123,7 +120,17 @@ class Trainer:
         """
         Perform one training step.
         """
+        result = []
+        loss = self.batch_loss(batch, result)
 
+        # Optimize
+        self.optimizer.minimize(loss, self.model.trainable_variables)
+        self.training_step += 1
+
+        return result
+
+
+    def batch_loss(self, batch, result):
         (
             observation_batch,
             action_batch,
@@ -134,139 +141,160 @@ class Trainer:
             gradient_scale_batch,
         ) = batch
 
-        # Keep values as scalars for calculating the priorities for the prioritized replay
-        target_value_scalar = numpy.array(target_value, dtype="float32")
-        priorities = numpy.zeros_like(target_value_scalar)
+        def compute_loss():
+            nonlocal observation_batch
+            nonlocal action_batch
+            nonlocal target_value
+            nonlocal target_reward
+            nonlocal target_policy
+            nonlocal weight_batch
+            nonlocal gradient_scale_batch
 
-        device = next(self.model.parameters()).device
-        if self.config.PER:
-            weight_batch = torch.tensor(weight_batch.copy()).float().to(device)
-        observation_batch = torch.tensor(observation_batch).float().to(device)
-        action_batch = torch.tensor(action_batch).long().to(device).unsqueeze(-1)
-        target_value = torch.tensor(target_value).float().to(device)
-        target_reward = torch.tensor(target_reward).float().to(device)
-        target_policy = torch.tensor(target_policy).float().to(device)
-        gradient_scale_batch = torch.tensor(gradient_scale_batch).float().to(device)
-        # observation_batch: batch, channels, height, width
-        # action_batch: batch, num_unroll_steps+1, 1 (unsqueeze)
-        # target_value: batch, num_unroll_steps+1
-        # target_reward: batch, num_unroll_steps+1
-        # target_policy: batch, num_unroll_steps+1, len(action_space)
-        # gradient_scale_batch: batch, num_unroll_steps+1
+            # Keep values as scalars for calculating the priorities for the prioritized replay
+            target_value_scalar = numpy.array(target_value, dtype="float32")
+            priorities = numpy.zeros_like(target_value_scalar, dtype="float32")
 
-        target_value = models.scalar_to_support(target_value, self.config.support_size)
-        target_reward = models.scalar_to_support(
-            target_reward, self.config.support_size
-        )
-        # target_value: batch, num_unroll_steps+1, 2*support_size+1
-        # target_reward: batch, num_unroll_steps+1, 2*support_size+1
+            if self.config.PER:
+                weight_batch = tf.identity(tf.cast(weight_batch, dtype=tf.float32))
+            observation_batch = tf.identity(tf.cast(observation_batch, dtype=tf.float32))
+            action_batch = tf.expand_dims(tf.identity(action_batch), axis=-1)
+            target_value = tf.identity(tf.cast(target_value, dtype=tf.float32))
+            target_reward = tf.identity(tf.cast(target_reward, dtype=tf.float32))
+            target_policy = tf.identity(tf.cast(target_policy, dtype=tf.float32))
+            gradient_scale_batch = tf.identity(tf.cast(gradient_scale_batch, dtype=tf.float32))
+            # observation_batch: batch, channels, height, width
+            # action_batch: batch, num_unroll_steps+1, 1 (unsqueeze)
+            # target_value: batch, num_unroll_steps+1
+            # target_reward: batch, num_unroll_steps+1
+            # target_policy: batch, num_unroll_steps+1, len(action_space)
+            # gradient_scale_batch: batch, num_unroll_steps+1
 
-        ## Generate predictions
-        value, reward, policy_logits, hidden_state = self.model.initial_inference(
-            observation_batch
-        )
-        predictions = [(value, reward, policy_logits)]
-        for i in range(1, action_batch.shape[1]):
-            value, reward, policy_logits, hidden_state = self.model.recurrent_inference(
-                hidden_state, action_batch[:, i]
+            target_value = models.scalar_to_support(target_value, self.config.support_size)
+            target_reward = models.scalar_to_support(
+                target_reward, self.config.support_size
             )
-            # Scale the gradient at the start of the dynamics function (See paper appendix Training)
-            hidden_state.register_hook(lambda grad: grad * 0.5)
-            predictions.append((value, reward, policy_logits))
-        # predictions: num_unroll_steps+1, 3, batch, 2*support_size+1 | 2*support_size+1 | 9 (according to the 2nd dim)
+            # target_value: batch, num_unroll_steps+1, 2*support_size+1
+            # target_reward: batch, num_unroll_steps+1, 2*support_size+1
 
-        ## Compute losses
-        value_loss, reward_loss, policy_loss = (0, 0, 0)
-        value, reward, policy_logits = predictions[0]
-        # Ignore reward loss for the first batch step
-        current_value_loss, _, current_policy_loss = self.loss_function(
-            value.squeeze(-1),
-            reward.squeeze(-1),
-            policy_logits,
-            target_value[:, 0],
-            target_reward[:, 0],
-            target_policy[:, 0],
-        )
-        value_loss += current_value_loss
-        policy_loss += current_policy_loss
-        # Compute priorities for the prioritized replay (See paper appendix Training)
-        pred_value_scalar = (
-            models.support_to_scalar(value, self.config.support_size)
-            .detach()
-            .cpu()
-            .numpy()
-            .squeeze()
-        )
-        priorities[:, 0] = (
-            numpy.abs(pred_value_scalar - target_value_scalar[:, 0])
-            ** self.config.PER_alpha
-        )
+            # obs batch
+            # B x H x W x C
+            # 128 x 1 x 1 x 4 (cartpole)
+            # value/reward
+            # B x N
+            # 128 x 21 (cartpole)
+            # policy
+            # B x A
+            # 128 x 2 (cartpole)
+            # hidden state
+            # B x X
+            # 128 x 8 (cartpole)
 
-        for i in range(1, len(predictions)):
-            value, reward, policy_logits = predictions[i]
-            (
-                current_value_loss,
-                current_reward_loss,
-                current_policy_loss,
-            ) = self.loss_function(
-                value.squeeze(-1),
-                reward.squeeze(-1),
+            ## Generate predictions
+            value, reward, policy_logits, hidden_state = self.model.initial_inference(
+                observation_batch, training=True
+            )
+            predictions = [(value, reward, policy_logits)]
+            for i in range(1, action_batch.shape[1]):
+                value, reward, policy_logits, hidden_state = self.model.recurrent_inference(
+                    hidden_state, action_batch[:, i], training=True
+                )
+                # Scale the gradient at the start of the dynamics function (See paper appendix Training)
+                hidden_state = scale_gradient(hidden_state, 0.5)
+                predictions.append((value, reward, policy_logits))
+            # predictions: num_unroll_steps+1, 3, batch, 2*support_size+1 | 2*support_size+1 | 9 (according to the 2nd dim)
+
+            ## Compute losses
+            value_loss, reward_loss, policy_loss = (0, 0, 0)
+            value, reward, policy_logits = predictions[0]
+            value_sq = tf.squeeze(value, axis=-1) if value.shape[-1] == 1 else value
+            reward_sq = tf.squeeze(reward, axis=-1) if reward.shape[-1] == 1 else reward
+            # Ignore reward loss for the first batch step
+            current_value_loss, _, current_policy_loss = self.loss_function(
+                value_sq,
+                reward_sq,
                 policy_logits,
-                target_value[:, i],
-                target_reward[:, i],
-                target_policy[:, i],
+                target_value[:, 0],
+                target_reward[:, 0],
+                target_policy[:, 0],
             )
-
-            # Scale gradient by the number of unroll steps (See paper appendix Training)
-            current_value_loss.register_hook(
-                lambda grad: grad / gradient_scale_batch[:, i]
-            )
-            current_reward_loss.register_hook(
-                lambda grad: grad / gradient_scale_batch[:, i]
-            )
-            current_policy_loss.register_hook(
-                lambda grad: grad / gradient_scale_batch[:, i]
-            )
-
             value_loss += current_value_loss
-            reward_loss += current_reward_loss
             policy_loss += current_policy_loss
-
             # Compute priorities for the prioritized replay (See paper appendix Training)
             pred_value_scalar = (
                 models.support_to_scalar(value, self.config.support_size)
-                .detach()
-                .cpu()
                 .numpy()
                 .squeeze()
             )
-            priorities[:, i] = (
-                numpy.abs(pred_value_scalar - target_value_scalar[:, i])
+            priorities[:, 0] = (
+                numpy.abs(pred_value_scalar - target_value_scalar[:, 0])
                 ** self.config.PER_alpha
             )
 
-        # Scale the value loss, paper recommends by 0.25 (See paper appendix Reanalyze)
-        loss = value_loss * self.config.value_loss_weight + reward_loss + policy_loss
-        if self.config.PER:
-            # Correct PER bias by using importance-sampling (IS) weights
-            loss *= weight_batch
-        # Mean over batch dimension (pseudocode do a sum)
-        loss = loss.mean()
+            for i in range(1, len(predictions)):
+                value, reward, policy_logits = predictions[i]
+                value_sq = tf.squeeze(value, axis=-1) if value.shape[-1] == 1 else value
+                reward_sq = tf.squeeze(reward, axis=-1) if reward.shape[-1] == 1 else reward
+                (
+                    current_value_loss,
+                    current_reward_loss,
+                    current_policy_loss,
+                ) = self.loss_function(
+                    value_sq,
+                    reward_sq,
+                    policy_logits,
+                    target_value[:, i],
+                    target_reward[:, i],
+                    target_policy[:, i],
+                )
+                # Scale gradient by the number of unroll steps (See paper appendix Training)
+                current_value_loss = scale_gradient(
+                    current_value_loss, gradient_scale_batch[:, i]
+                )
+                current_reward_loss = scale_gradient(
+                    current_reward_loss, gradient_scale_batch[:, i]
+                )
+                current_policy_loss = scale_gradient(
+                    current_policy_loss, gradient_scale_batch[:, i]
+                )
 
-        # Optimize
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        self.training_step += 1
+                value_loss += current_value_loss
+                reward_loss += current_reward_loss
+                policy_loss += current_policy_loss
 
-        return (
-            priorities,
+                # Compute priorities for the prioritized replay (See paper appendix Training)
+                pred_value_scalar = (
+                    models.support_to_scalar(value, self.config.support_size)
+                    .numpy()
+                    .squeeze()
+                )
+                priorities[:, i] = (
+                    numpy.abs(pred_value_scalar - target_value_scalar[:, i])
+                    ** self.config.PER_alpha
+                )
+
+            l2_loss = 0
+            for t in self.model.trainable_variables:
+                l2_loss += self.config.weight_decay * tf.nn.l2_loss(t).numpy()
+
+            # Scale the value loss, paper recommends by 0.25 (See paper appendix Reanalyze)
+            loss = value_loss * self.config.value_loss_weight + reward_loss + policy_loss
+            if self.config.PER:
+                # Correct PER bias by using importance-sampling (IS) weights
+                loss *= weight_batch
+            # Mean over batch dimension (pseudocode do a sum)
+            loss = tf.math.reduce_mean(loss) + l2_loss
+
+            result.append(priorities)
             # For log purpose
-            loss.item(),
-            value_loss.mean().item(),
-            reward_loss.mean().item(),
-            policy_loss.mean().item(),
-        )
+            result.append(loss.numpy())
+            result.append(tf.math.reduce_mean(value_loss).numpy())
+            result.append(tf.math.reduce_mean(reward_loss).numpy())
+            result.append(tf.math.reduce_mean(policy_loss).numpy())
+
+            return loss
+        
+        return compute_loss
+
 
     def update_lr(self):
         """
@@ -275,8 +303,7 @@ class Trainer:
         lr = self.config.lr_init * self.config.lr_decay_rate ** (
             self.training_step / self.config.lr_decay_steps
         )
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
+        tf.keras.backend.set_value(self.optimizer.learning_rate, lr)
 
     @staticmethod
     def loss_function(
@@ -288,9 +315,7 @@ class Trainer:
         target_policy,
     ):
         # Cross-entropy seems to have a better convergence than MSE
-        value_loss = (-target_value * torch.nn.LogSoftmax(dim=1)(value)).sum(1)
-        reward_loss = (-target_reward * torch.nn.LogSoftmax(dim=1)(reward)).sum(1)
-        policy_loss = (-target_policy * torch.nn.LogSoftmax(dim=1)(policy_logits)).sum(
-            1
-        )
+        value_loss = tf.reduce_sum(-target_value * tf.nn.log_softmax(value, axis=1), axis=1)
+        reward_loss = tf.reduce_sum(-target_reward * tf.nn.log_softmax(reward, axis=1), axis=1)
+        policy_loss = tf.reduce_sum(-target_policy * tf.nn.log_softmax(policy_logits), axis=1)
         return value_loss, reward_loss, policy_loss

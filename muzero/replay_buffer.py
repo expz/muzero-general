@@ -3,7 +3,7 @@ import time
 
 import numpy
 import ray
-import torch
+import tensorflow as tf
 
 import muzero.models as models
 
@@ -289,13 +289,11 @@ class Reanalyse:
 
         # Fix random generator seed
         numpy.random.seed(self.config.seed)
-        torch.manual_seed(self.config.seed)
+        tf.random.set_seed(self.config.seed)
 
         # Initialize the network
         self.model = models.MuZeroNetwork(self.config)
         self.model.set_weights(initial_checkpoint["weights"])
-        self.model.to(torch.device("cuda" if self.config.reanalyse_on_gpu else "cpu"))
-        self.model.eval()
 
         self.num_reanalysed_games = initial_checkpoint["num_reanalysed_games"]
 
@@ -324,16 +322,14 @@ class Reanalyse:
                 ]
 
                 observations = (
-                    torch.tensor(observations)
-                    .float()
-                    .to(next(self.model.parameters()).device)
+                    tf.convert_to_tensor(observations, dtype=tf.float32)
                 )
                 values = models.support_to_scalar(
                     self.model.initial_inference(observations)[0],
                     self.config.support_size,
                 )
                 game_history.reanalysed_predicted_root_values = (
-                    torch.squeeze(values).detach().numpy()
+                    tf.squeeze(values).numpy()
                 )
 
             replay_buffer.update_game_history.remote(game_id, game_history)

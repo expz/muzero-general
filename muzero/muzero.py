@@ -7,8 +7,8 @@ import time
 import nevergrad
 import numpy
 import ray
-import torch
 from torch.utils.tensorboard import SummaryWriter
+import tensorflow as tf
 
 import muzero.diagnose_model as diagnose_model
 from muzero.games.defaults import MuZeroConfig
@@ -61,13 +61,13 @@ class MuZero:
 
         # Fix random generator seed
         numpy.random.seed(self.config.seed)
-        torch.manual_seed(self.config.seed)
+        tf.random.set_seed(self.config.seed)
 
         # Manage GPUs
         total_gpus = (
             self.config.max_num_gpus
             if self.config.max_num_gpus is not None
-            else torch.cuda.device_count()
+            else len(tf.config.experimental.list_physical_devices('GPU'))
         )
         self.num_gpus = total_gpus / split_resources_in
         if 1 < self.num_gpus:
@@ -417,7 +417,7 @@ class MuZero:
         # Load checkpoint
         if checkpoint_path:
             if os.path.exists(checkpoint_path):
-                self.checkpoint = torch.load(checkpoint_path)
+                self.checkpoint = tf.saved_model.load(checkpoint_path)
                 print(f"\nUsing checkpoint from {checkpoint_path}")
             else:
                 print(f"\nThere is no model saved in {checkpoint_path}.")
@@ -528,7 +528,7 @@ def hyperparameter_search(
     if best_training:
         # Save best training weights (but it's not the recommended weights)
         os.makedirs(best_training["config"].results_path, exist_ok=True)
-        torch.save(
+        tf.saved_model.save(
             best_training["checkpoint"],
             os.path.join(best_training["config"].results_path, "model.checkpoint"),
         )

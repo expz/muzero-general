@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy
 import seaborn
-import torch
+import tensorflow as tf
 
 import muzero.models as models
 from muzero.self_play import MCTS, Node, SelfPlay
@@ -51,7 +51,7 @@ class DiagnoseModel:
             # Generate new root
             value, reward, policy_logits, hidden_state = self.model.recurrent_inference(
                 root.hidden_state,
-                torch.tensor([[action]]).to(root.hidden_state.device),
+                tf.identity([[action]]),
             )
             value = models.support_to_scalar(value, self.config.support_size).item()
             reward = models.support_to_scalar(reward, self.config.support_size).item()

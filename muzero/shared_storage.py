@@ -1,8 +1,8 @@
 import copy
 import os
 
+import numpy
 import ray
-import torch
 
 
 @ray.remote
@@ -19,7 +19,9 @@ class SharedStorage:
         if not path:
             path = os.path.join(self.config.results_path, "model.checkpoint")
 
-        torch.save(self.current_checkpoint, path)
+        # must load using numpy.load(path)[()] because it stores the
+        # dictionary in an array with a single object, the dictionary.
+        numpy.save(path, self.current_checkpoint)
 
     def get_checkpoint(self):
         return copy.deepcopy(self.current_checkpoint)

@@ -3,7 +3,7 @@ import time
 
 import numpy
 import ray
-import torch
+import tensorflow as tf
 
 import muzero.models as models
 
@@ -20,13 +20,11 @@ class SelfPlay:
 
         # Fix random generator seed
         numpy.random.seed(seed)
-        torch.manual_seed(seed)
+        tf.random.set_seed(seed)
 
         # Initialize the network
         self.model = models.MuZeroNetwork(self.config)
         self.model.set_weights(initial_checkpoint["weights"])
-        self.model.to(torch.device("cuda" if self.config.selfplay_on_gpu else "cpu"))
-        self.model.eval()
 
     def continuous_self_play(self, shared_storage, replay_buffer, test_mode=False):
         while ray.get(
@@ -125,61 +123,60 @@ class SelfPlay:
         if render:
             self.game.render()
 
-        with torch.no_grad():
-            while (
-                not done and len(game_history.action_history) <= self.config.max_moves
-            ):
-                assert (
-                    len(numpy.array(observation).shape) == 3
-                ), f"Observation should be 3 dimensionnal instead of {len(numpy.array(observation).shape)} dimensionnal. Got observation of shape: {numpy.array(observation).shape}"
-                assert (
-                    numpy.array(observation).shape == self.config.observation_shape
-                ), f"Observation should match the observation_shape defined in MuZeroConfig. Expected {self.config.observation_shape} but got {numpy.array(observation).shape}."
-                stacked_observations = game_history.get_stacked_observations(
-                    -1,
-                    self.config.stacked_observations,
+        while (
+            not done and len(game_history.action_history) <= self.config.max_moves
+        ):
+            assert (
+                len(numpy.array(observation).shape) == 3
+            ), f"Observation should be 3 dimensionnal instead of {len(numpy.array(observation).shape)} dimensionnal. Got observation of shape: {numpy.array(observation).shape}"
+            assert (
+                numpy.array(observation).shape == self.config.observation_shape
+            ), f"Observation should match the observation_shape defined in MuZeroConfig. Expected {self.config.observation_shape} but got {numpy.array(observation).shape}."
+            stacked_observations = game_history.get_stacked_observations(
+                -1,
+                self.config.stacked_observations,
+            )
+
+            # Choose the action
+            if opponent == "self" or muzero_player == self.game.to_play():
+                root, mcts_info = MCTS(self.config).run(
+                    self.model,
+                    stacked_observations,
+                    self.game.legal_actions(),
+                    self.game.to_play(),
+                    True,
+                )
+                action = self.select_action(
+                    root,
+                    temperature
+                    if not temperature_threshold
+                    or len(game_history.action_history) < temperature_threshold
+                    else 0,
                 )
 
-                # Choose the action
-                if opponent == "self" or muzero_player == self.game.to_play():
-                    root, mcts_info = MCTS(self.config).run(
-                        self.model,
-                        stacked_observations,
-                        self.game.legal_actions(),
-                        self.game.to_play(),
-                        True,
-                    )
-                    action = self.select_action(
-                        root,
-                        temperature
-                        if not temperature_threshold
-                        or len(game_history.action_history) < temperature_threshold
-                        else 0,
-                    )
-
-                    if render:
-                        print(f'Tree depth: {mcts_info["max_tree_depth"]}')
-                        print(
-                            f"Root value for player {self.game.to_play()}: {root.value():.2f}"
-                        )
-                else:
-                    action, root = self.select_opponent_action(
-                        opponent, stacked_observations
-                    )
-
-                observation, reward, done = self.game.step(action)
-
                 if render:
-                    print(f"Played action: {self.game.action_to_string(action)}")
-                    self.game.render()
+                    print(f'Tree depth: {mcts_info["max_tree_depth"]}')
+                    print(
+                        f"Root value for player {self.game.to_play()}: {root.value():.2f}"
+                    )
+            else:
+                action, root = self.select_opponent_action(
+                    opponent, stacked_observations
+                )
 
-                game_history.store_search_statistics(root, self.config.action_space)
+            observation, reward, done = self.game.step(action)
 
-                # Next batch
-                game_history.action_history.append(action)
-                game_history.observation_history.append(observation)
-                game_history.reward_history.append(reward)
-                game_history.to_play_history.append(self.game.to_play())
+            if render:
+                print(f"Played action: {self.game.action_to_string(action)}")
+                self.game.render()
+
+            game_history.store_search_statistics(root, self.config.action_space)
+
+            # Next batch
+            game_history.action_history.append(action)
+            game_history.observation_history.append(observation)
+            game_history.reward_history.append(reward)
+            game_history.to_play_history.append(self.game.to_play())
 
         return game_history
 
@@ -279,10 +276,7 @@ class MCTS:
         else:
             root = Node(0)
             observation = (
-                torch.tensor(observation)
-                .float()
-                .unsqueeze(0)
-                .to(next(model.parameters()).device)
+                tf.expand_dims(tf.identity(observation), axis=0)
             )
             (
                 root_predicted_value,
@@ -290,10 +284,10 @@ class MCTS:
                 policy_logits,
                 hidden_state,
             ) = model.initial_inference(observation)
-            root_predicted_value = models.support_to_scalar(
+            root_predicted_value = tf.squeeze(models.support_to_scalar(
                 root_predicted_value, self.config.support_size
-            ).item()
-            reward = models.support_to_scalar(reward, self.config.support_size).item()
+            )).numpy()
+            reward = tf.squeeze(models.support_to_scalar(reward, self.config.support_size)).numpy()
             assert (
                 legal_actions
             ), f"Legal actions should not be an empty array. Got {legal_actions}."
@@ -323,6 +317,7 @@ class MCTS:
             search_path = [node]
             current_tree_depth = 0
 
+            action = None
             while node.expanded():
                 current_tree_depth += 1
                 action, node = self.select_child(node, min_max_stats)
@@ -339,10 +334,10 @@ class MCTS:
             parent = search_path[-2]
             value, reward, policy_logits, hidden_state = model.recurrent_inference(
                 parent.hidden_state,
-                torch.tensor([[action]]).to(parent.hidden_state.device),
+                tf.identity([[action]]),
             )
-            value = models.support_to_scalar(value, self.config.support_size).item()
-            reward = models.support_to_scalar(reward, self.config.support_size).item()
+            value = tf.squeeze(models.support_to_scalar(value, self.config.support_size)).numpy()
+            reward = tf.squeeze(models.support_to_scalar(reward, self.config.support_size)).numpy()
             node.expand(
                 self.config.action_space,
                 virtual_to_play,
@@ -431,6 +426,13 @@ class MCTS:
             raise NotImplementedError("More than two player mode not implemented.")
 
 
+def numpy_softmax(z):
+    # https://stackoverflow.com/questions/34968722/how-to-implement-the-softmax-function-in-python
+    assert len(z.shape) == 2
+    e_x = numpy.exp(z - numpy.amax(z, axis=1, keepdims=True))
+    return e_x / numpy.sum(e_x, axis=1, keepdims=True)
+
+
 class Node:
     def __init__(self, prior):
         self.visit_count = 0
@@ -458,9 +460,9 @@ class Node:
         self.reward = reward
         self.hidden_state = hidden_state
 
-        policy_values = torch.softmax(
-            torch.tensor([policy_logits[0][a] for a in actions]), dim=0
-        ).tolist()
+        policy_values = numpy_softmax(
+            numpy.array([[policy_logits[0][a] for a in actions]])
+        )[0].tolist()
         policy = {a: policy_values[i] for i, a in enumerate(actions)}
         for action, p in policy.items():
             self.children[action] = Node(p)
