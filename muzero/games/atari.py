@@ -73,7 +73,7 @@ CONFIG = with_defaults({
     'resnet_fc_policy_layers': [256, 256],  # Define the hidden layers in the policy head of the prediction network
 
     # Fully Connected Network
-    'encoding_size': 10
+    'encoding_size': 10,
     'fc_representation_layers': [],  # Define the hidden layers in the representation network
     'fc_dynamics_layers': [16],  # Define the hidden layers in the dynamics network
     'fc_reward_layers': [16],  # Define the hidden layers in the reward network
@@ -102,8 +102,7 @@ CONFIG = with_defaults({
 
     # Temperature
     'visit_softmax_temperature_fn': visit_softmax_temperature_fn,
-}
-
+})
 
 
 class Game(AbstractGame):

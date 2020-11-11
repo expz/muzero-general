@@ -652,9 +652,15 @@ def mlp(
 
 
 def support_to_scalar(logits, support_size):
+    """
+    Transform a categorical representation to a scalar
+    See paper appendix Network Architecture
+    """
+    # Decode to a scalar
     probabilities = tf.nn.softmax(logits, axis=1)
     basis = tf.range(-support_size, support_size + 1, 1.0)
     x = tf.tensordot(probabilities, basis, axes=[[-1], [0]])
+    # Invert the scaling (defined in https://arxiv.org/abs/1805.11593)
     x = tf.math.sign(x) * (
         ((tf.math.sqrt(1 + 4 * 0.001 * (tf.math.abs(x) + 1 + 0.001)) - 1) / (2 * 0.001))
         ** 2
@@ -662,28 +668,12 @@ def support_to_scalar(logits, support_size):
     )
     return x
 
-# def support_to_scalar(logits, support_size):
-#     """
-#     Transform a categorical representation to a scalar
-#     See paper appendix Network Architecture
-#     """
-#     # Decode to a scalar
-#     probabilities = tf.nn.softmax(logits, axis=1)
-#     support = tf.tile(
-#         tf.convert_to_tensor([[x for x in range(-support_size, support_size + 1)]], dtype=tf.float32),
-#         [probabilities.shape[0], 1]
-#     )
-#     x = tf.reduce_sum(support * probabilities, axis=1, keepdims=True)
-#     # Invert the scaling (defined in https://arxiv.org/abs/1805.11593)
-#     x = tf.math.sign(x) * (
-#         ((tf.math.sqrt(1 + 4 * 0.001 * (tf.math.abs(x) + 1 + 0.001)) - 1) / (2 * 0.001))
-#         ** 2
-#         - 1
-#     )
-#     return x
-
 
 def scalar_to_support(t, bound):
+    """
+    Transform a scalar to a categorical representation with (2 * support_size + 1) categories
+    See paper appendix Network Architecture
+    """
     # Reduce the scale (defined in https://arxiv.org/abs/1805.11593)
     t = tf.math.sign(t) * (tf.math.sqrt(tf.math.abs(t) + 1) - 1) + 0.001 * t
     t_clipped = tf.clip_by_value(t, -bound, bound)
@@ -708,36 +698,3 @@ def scalar_to_support(t, bound):
     indices_l = zip_with_indices(indices_l + bound, tf.shape(t)[0], tf.shape(t)[1])
     indices_u = zip_with_indices(indices_u + bound, tf.shape(t)[0], tf.shape(t)[1])
     return tf.scatter_nd(indices_l, left, shape) + tf.scatter_nd(indices_u, right, shape)
-
-# def scalar_to_support(x, support_size):
-#     """
-#     Transform a scalar to a categorical representation with (2 * support_size + 1) categories
-#     See paper appendix Network Architecture
-#     """
-#     # Reduce the scale (defined in https://arxiv.org/abs/1805.11593)
-#     x = tf.math.sign(x) * (tf.math.sqrt(tf.math.abs(x) + 1) - 1) + 0.001 * x
-
-#     # Encode on a vector
-#     x = tf.clip_by_value(x, -support_size, support_size)
-#     floor = tf.math.floor(x)
-#     prob = x - floor
-#     logits = tf.identity(tf.zeros(x.shape[0], x.shape[1], 2 * support_size + 1))
-
-#     def zip_with_indices(u, x, y):
-#         return tf.transpose(tf.stack([
-#             tf.tile(tf.range(x), tf.reshape(y, (1,))),
-#             tf.repeat(tf.range(y), tf.reshape(x, (1,))),
-#             tf.reshape(u, (-1,))
-#         ]))
-    
-#     tf.tensor_scatter_nd_update(
-#         logits,
-#         2,
-#         tf.expand_dims(tf.cast(floor + support_size, tf.int32), axis=-1),
-#         tf.expand_dims(1 - prob, axis=-1)
-#     )
-#     indexes = floor + support_size + 1
-#     prob = prob.masked_fill_(2 * support_size < indexes, 0.0)
-#     indexes = indexes.masked_fill_(2 * support_size < indexes, 0.0)
-#     logits.scatter_(2, indexes.long().unsqueeze(-1), prob.unsqueeze(-1))
-#    return logits

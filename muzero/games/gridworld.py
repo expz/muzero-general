@@ -96,7 +96,7 @@ CONFIG = with_defaults({
     # Exponential learning rate schedule
     'lr_init': 0.005,  # Initial learning rate
     'lr_decay_rate': 1,  # Set it to 1 to use a constant learning rate
-    'lr_decay_steps': 1000
+    'lr_decay_steps': 1000,
 
     ### Replay Buffer
     'replay_buffer_size': 5000,  # Number of self-play games to keep in the replay buffer

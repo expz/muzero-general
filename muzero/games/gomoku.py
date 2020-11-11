@@ -187,6 +187,7 @@ class Game(AbstractGame):
             An integer from the action space.
         """
         valid = False
+        action = None
         while not valid:
             valid, action = self.env.human_input_to_action()
         return action
